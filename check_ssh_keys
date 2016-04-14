@@ -1,0 +1,100 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+set -eu
+USAGE="usage: ${0##*/} [options]
+Check private keys for conformance to EIS Guidelines at
+https://wiki.mozilla.org/Security/Guidelines/OpenSSH#Key_generation
+
+Options are:
+    --ssh-dir   directory to check (default ~/.ssh/)
+    -h|--help   this help
+"
+
+declare -i num_warning=0
+declare -i num_okay=0
+
+warn() { for m; do echo "$m"; done >/dev/stderr ;  let num_warning++ || : ; }
+die() { warn "$@"; exit 1; }
+usage() { warn "$@" "$USAGE"; test $# -eq 0; exit $? ; }
+
+ssh_dir=${HOME}/.ssh
+while test $# -gt 0; do
+    case "$1" in
+        --ssh-dir) ssh_dir="$2" ; shift ;;
+        -h|--help) usage ;;
+        -*) usage "Unknown option '$1'" ;;
+        *) break ;;
+    esac
+    shift
+done
+
+test $# -eq 0 || usage "Wrong number of arguments: $#"
+test -d "$ssh_dir" || usage "Not a directory: $ssh_dir"
+tmpdir=$(mktemp -d /tmp/${0##*/}.$USER.XXXXXX) || die "Can't create temp directory"
+trap "rm -rf $tmpdir" EXIT
+
+function count_as_okay() {
+    let num_okay++ || :
+}
+
+function check_key() {
+    local file="$1"
+    local output="$2"
+    local -i ec=0
+
+    local -a params=( $output )
+    local key_type=${params[$(( ${#params[@]} - 1 ))]}
+    case ${key_type//[()]/} in
+        DSA) warn "All DSA keys are considered weak, please upgrade '$file'" ;;
+        RSA) 
+            local -i key_len=${params[0]}
+            if test $key_len -lt 4096 ; then
+                warn "Weak RSA key len ($key_len) for $file" ;
+            else
+                count_as_okay
+            fi ;;
+        ECDSA) count_as_okay ;; # okay
+        ED25519) count_as_okay ;; # okay
+        *) warn "Unknown key type '$key_type' for $file" ;;
+    esac
+}
+
+echo "Checking private ssh keys in $ssh_dir:"
+for f in $(ls $ssh_dir | 
+           grep -Ev '^(authorized_keys2?|config|known_hosts2?|.+\.(bak|old|orig|pub))$' ); do
+    # skip sockets and other non-traditional-files
+    test -f $ssh_dir/$f || continue
+    ec=0
+    output=$(ssh-keygen -lf $ssh_dir/$f 2>&1 ) || ec=$?
+    if test $ec -eq 255; then
+        # not a valid public key, see if private key
+        # do a quick hack to inform user about possible prompt
+        if head -2 $ssh_dir/$f | grep -qE 'BEGIN .* PRIVATE KEY'; then
+            echo "    You may be prompted for pass phrase for '$f'" 1>&2
+        fi
+        ssh-keygen -f $ssh_dir/$f -y >$tmpdir/$f.pub 2>/dev/null || :
+        ec=0
+        output=$(ssh-keygen -lf $tmpdir/$f.pub 2>&1) || ec=$?
+        if test $ec -eq 0 ; then
+            # valid private key, let's see if it was passphrase
+            # protected
+            rm -f $tmpdir/check_for_passphrase
+            cp -f $ssh_dir/$f $tmpdir/check_for_passphrase
+            chmod 600 $tmpdir/check_for_passphrase
+            # use our own agent to avoid key added
+            ssh-agent ssh-keygen -yf $tmpdir/check_for_passphrase -P '' &>/dev/null && ec=33
+        fi
+    fi
+    case $ec in
+        255) warn "not a valid public or private key file: $f" ;;
+        33) warn "No passphrase for private key '$f'"
+            check_key $f "$output"
+            ;;
+        0) check_key $f "$output" ;;
+    esac
+done
+printf "%3d conforming keys found\n" $num_okay
+printf "%3d warnings generated\n" $num_warning
