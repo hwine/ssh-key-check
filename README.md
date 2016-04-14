@@ -20,6 +20,7 @@ Simply add the ```--ssh-dir DIR``` option to specify that directory.
 Other options may become available over time. Use the ```-h``` option to
 see them. Currently:
 ```
+    $ ./check_ssh_keys --help
     usage: check_ssh_keys [options]
     Check private keys for conformance to EIS Guidelines at
     https://wiki.mozilla.org/Security/Guidelines/OpenSSH#Key_generation
